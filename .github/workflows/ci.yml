@@ -18,6 +18,27 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Resolve updated dependency lockfile (security branch only)
+        if: github.ref == 'refs/heads/security/next-audit-fixes'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          node <<'NODE'
+          const fs = require('node:fs');
+          const bytes = fs.readFileSync('package-lock.json');
+          const obj = JSON.parse(bytes.toString('utf8'));
+          if (obj.packages[''].dependencies.next !== '16.4.2' || obj.packages[''].devDependencies['eslint-config-next'] !== '16.4.2') {
+            throw new Error('Resolved lockfile does not match pinned security versions');
+          }
+          const encoded = bytes.toString('base64');
+          console.log('RIVERLAB_LOCK_START');
+          for (let i = 0; i < encoded.length; i += 2048) {
+            console.log('RIVERLAB_LOCK_PART:' + encoded.slice(i, i + 2048));
+          }
+          console.log('RIVERLAB_LOCK_END');
+          console.log('LOCKFILE_BYTES=' + bytes.length + ' LOCKFILE_VERSION=' + obj.lockfileVersion);
+          NODE
       - run: npm ci
       - name: Report npm dependency vulnerabilities (informational)
         shell: bash
