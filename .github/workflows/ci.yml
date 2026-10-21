@@ -19,6 +19,58 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - run: npm ci
+      - name: Report npm dependency vulnerabilities (informational)
+        shell: bash
+        run: |
+          set +e
+          npm audit --json > "$RUNNER_TEMP/npm-audit-all.json"
+          all_status=$?
+          npm audit --omit=dev --json > "$RUNNER_TEMP/npm-audit-production.json"
+          production_status=$?
+          set -e
+          AUDIT_ALL_STATUS="$all_status" AUDIT_PRODUCTION_STATUS="$production_status" node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const scopes = [
+            { label: 'All dependencies', file: 'npm-audit-all.json', status: process.env.AUDIT_ALL_STATUS },
+            { label: 'Production only (--omit=dev)', file: 'npm-audit-production.json', status: process.env.AUDIT_PRODUCTION_STATUS },
+          ];
+          const lines = [
+            '## npm dependency vulnerability assessment',
+            '',
+            'Informational only: these commands do not update dependencies or approve deployment.',
+            '',
+            '| Scope | Critical | High | Moderate | Low | Total | npm exit |',
+            '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+          ];
+          for (const scope of scopes) {
+            const audit = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, scope.file), 'utf8'));
+            if (audit.error || !audit.metadata || !audit.metadata.vulnerabilities || typeof audit.vulnerabilities !== 'object') {
+              throw new Error('npm audit returned an unusable response for ' + scope.label);
+            }
+            const counts = audit.metadata.vulnerabilities;
+            const total = Number(counts.total || 0);
+            const critical = Number(counts.critical || 0);
+            const high = Number(counts.high || 0);
+            const moderate = Number(counts.moderate || 0);
+            const low = Number(counts.low || 0);
+            lines.push(`| ${scope.label} | ${critical} | ${high} | ${moderate} | ${low} | ${total} | ${scope.status} |`);
+            console.log(`AUDIT_SCOPE=${scope.label} CRITICAL=${critical} HIGH=${high} MODERATE=${moderate} LOW=${low} TOTAL=${total} EXIT=${scope.status}`);
+            lines.push('', `### ${scope.label}: affected packages`, '');
+            lines.push('| Package | Severity | Direct | Fix available |', '| --- | --- | --- | --- |');
+            const entries = Object.entries(audit.vulnerabilities).sort((a, b) => a[0].localeCompare(b[0]));
+            if (!entries.length) lines.push('| None reported | — | — | — |');
+            for (const [name, info] of entries) {
+              const fix = info.fixAvailable === false ? 'No' : info.fixAvailable === true ? 'Yes' : info.fixAvailable && typeof info.fixAvailable === 'object' ? `${info.fixAvailable.name || name}@${info.fixAvailable.version || '?'}${info.fixAvailable.isSemVerMajor ? ' (major)' : ''}` : 'Unknown';
+              const safe = String(name).replaceAll('|', '\\|');
+              lines.push(`| ${safe} | ${info.severity || 'unknown'} | ${Boolean(info.isDirect)} | ${String(fix).replaceAll('|', '\\|')} |`);
+              console.log(`AUDIT_PACKAGE scope=${scope.label} name=${name} severity=${info.severity || 'unknown'} direct=${Boolean(info.isDirect)} fix=${fix}`);
+            }
+            if (critical > 0 || high > 0) lines.push('', '**Security gate: HOLD — high or critical vulnerabilities require review before public deployment.**');
+            lines.push('');
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+          NODE
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
